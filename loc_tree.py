@@ -41,19 +41,22 @@ DEFAULT_CODE_EXTENSIONS = (
     ".tf",
     ".yaml",
     ".yml",
+    ".cpp",
 )
 DEFAULT_CODE_EXTENSIONS_CSV = ",".join(DEFAULT_CODE_EXTENSIONS)
-SORT_MODES = ("tokens", "lines", "name")
+SORT_MODES = ("tokens", "lines", "size", "name")
 
 
 @dataclass
 class Metrics:
     lines: int = 0
     tokens: int = 0
+    size_bytes: int = 0
 
     def add(self, other: "Metrics") -> None:
         self.lines += other.lines
         self.tokens += other.tokens
+        self.size_bytes += other.size_bytes
 
 
 @dataclass
@@ -234,6 +237,7 @@ def count_file_metrics(
     path: Path,
     chars_per_token: float,
     include_blank_lines: bool,
+    file_size_bytes: int,
 ) -> Metrics:
     if chars_per_token <= 0:
         raise ValueError("--chars-per-token must be greater than 0.")
@@ -247,10 +251,10 @@ def count_file_metrics(
                 if include_blank_lines or line.strip():
                     lines += 1
     except (OSError, UnicodeError):
-        return Metrics()
+        return Metrics(size_bytes=file_size_bytes)
 
     tokens = int(math.ceil(char_count / chars_per_token)) if char_count else 0
-    return Metrics(lines=lines, tokens=tokens)
+    return Metrics(lines=lines, tokens=tokens, size_bytes=file_size_bytes)
 
 
 def scan_directory(
@@ -293,6 +297,11 @@ def scan_directory(
                         include_hidden=include_hidden,
                     ):
                         continue
+                    file_size_bytes = 0
+                    try:
+                        file_size_bytes = entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
                     counted = is_counted_code_file(
                         entry_path,
                         code_extensions=code_extensions,
@@ -302,12 +311,12 @@ def scan_directory(
                             entry_path,
                             chars_per_token=chars_per_token,
                             include_blank_lines=include_blank_lines,
+                            file_size_bytes=file_size_bytes,
                         )
                         if counted
-                        else Metrics()
+                        else Metrics(size_bytes=file_size_bytes)
                     )
-                    if counted:
-                        root_metrics.add(metrics)
+                    root_metrics.add(metrics)
                     file_nodes.append(
                         FileStats(
                             path=entry_path,
@@ -340,6 +349,7 @@ def scan_directory(
     total_metrics = Metrics(
         lines=root_metrics.lines + children_metrics.lines,
         tokens=root_metrics.tokens + children_metrics.tokens,
+        size_bytes=root_metrics.size_bytes + children_metrics.size_bytes,
     )
 
     if (
@@ -362,11 +372,31 @@ def scan_directory(
 
 
 def format_metrics(metrics: Metrics) -> str:
-    return f"{metrics.lines:,} lines, ~{metrics.tokens:,} tokens"
+    return (
+        f"{metrics.lines:,} lines, ~{metrics.tokens:,} tokens, "
+        f"{format_size_bytes(metrics.size_bytes)}"
+    )
 
 
 def format_cell(value: int) -> str:
     return f"{value:,}"
+
+
+def format_size_bytes(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+
+    size = float(size_bytes)
+    units = ("KiB", "MiB", "GiB", "TiB", "PiB")
+    for unit in units:
+        size /= 1024.0
+        if size < 1024.0 or unit == units[-1]:
+            return f"{size:.1f} {unit}"
+    return f"{size_bytes} B"
+
+
+def format_size_cell(size_bytes: int) -> str:
+    return format_size_bytes(size_bytes)
 
 
 def render_scaled_bar(value: int, max_value: int, bar_width: int) -> str:
@@ -405,7 +435,7 @@ def format_file_description(file_stats: FileStats) -> str:
     if file_stats.counted:
         return format_metrics(file_stats.metrics)
     suffix = file_stats.path.suffix.lower() or "<no-ext>"
-    return f"0 lines, ~0 tokens; excluded extension ({suffix})"
+    return f"{format_metrics(file_stats.metrics)}; excluded extension ({suffix})"
 
 
 def render_tree(node: DirectoryStats) -> str:
@@ -494,7 +524,12 @@ def sorted_browser_entries(
 
     def sort_key(entry: BrowserEntry) -> tuple[int, int, str]:
         metrics = entry_metrics(entry)
-        primary = metrics.lines if sort_mode == "lines" else metrics.tokens
+        if sort_mode == "lines":
+            primary = metrics.lines
+        elif sort_mode == "size":
+            primary = metrics.size_bytes
+        else:
+            primary = metrics.tokens
         return (-primary, 0 if entry.kind == "dir" else 1, entry.name.lower())
 
     return sorted(entries, key=sort_key)
@@ -577,7 +612,7 @@ def run_ncdu(node: DirectoryStats) -> int:
             bar_width = max(6, min(16, width // 10))
             header = (
                 "Name                             Type  Counted"
-                "        Lines       Tokens LOC Bar          Token Bar"
+                "        Lines       Tokens        Size LOC Bar          Token Bar"
             )
             stdscr.addnstr(
                 5,
@@ -595,7 +630,7 @@ def run_ncdu(node: DirectoryStats) -> int:
                 scroll_offset = selected - available_rows + 1
 
             visible_entries = entries[scroll_offset : scroll_offset + available_rows]
-            name_width = max(12, width - (44 + ((bar_width + 2) * 2) + 2))
+            name_width = max(12, width - (57 + ((bar_width + 2) * 2) + 2))
 
             for idx, entry in enumerate(visible_entries):
                 real_idx = scroll_offset + idx
@@ -604,7 +639,8 @@ def run_ncdu(node: DirectoryStats) -> int:
                 if entry.kind == "parent":
                     row = (
                         f"{entry.name:<{name_width}} {'dir':<5} {'-':<7} "
-                        f"{'':>12} {'':>12} {'':>{bar_width + 2}} {'':>{bar_width + 2}}"
+                        f"{'':>12} {'':>12} {'':>11} "
+                        f"{'':>{bar_width + 2}} {'':>{bar_width + 2}}"
                     )
                 elif entry.kind == "placeholder":
                     loc_bar = render_loc_bar(
@@ -617,7 +653,8 @@ def run_ncdu(node: DirectoryStats) -> int:
                     )
                     row = (
                         f"{entry.name:<{name_width}} {'-':<5} {'-':<7} "
-                        f"{0:>12} {0:>12} {loc_bar} {token_bar}"
+                        f"{0:>12} {0:>12} {format_size_cell(0):>11} "
+                        f"{loc_bar} {token_bar}"
                     )
                 elif entry.kind == "dir" and entry.directory is not None:
                     loc_bar = render_loc_bar(
@@ -635,6 +672,7 @@ def run_ncdu(node: DirectoryStats) -> int:
                         f"{'dir':<5} {'-':<7} "
                         f"{format_cell(entry.directory.total_metrics.lines):>12} "
                         f"{format_cell(entry.directory.total_metrics.tokens):>12} "
+                        f"{format_size_cell(entry.directory.total_metrics.size_bytes):>11} "
                         f"{loc_bar} {token_bar}"
                     )
                 elif entry.kind == "file" and entry.file is not None:
@@ -654,12 +692,14 @@ def run_ncdu(node: DirectoryStats) -> int:
                         f"{('yes' if entry.file.counted else 'no'):<7} "
                         f"{format_cell(entry.file.metrics.lines):>12} "
                         f"{format_cell(entry.file.metrics.tokens):>12} "
+                        f"{format_size_cell(entry.file.metrics.size_bytes):>11} "
                         f"{loc_bar} {token_bar}"
                     )
                 else:
                     row = (
                         f"{entry.name:<{name_width}} {'?':<5} {'-':<7} "
-                        f"{'':>12} {'':>12} {'':>{bar_width + 2}} {'':>{bar_width + 2}}"
+                        f"{'':>12} {'':>12} {'':>11} "
+                        f"{'':>{bar_width + 2}} {'':>{bar_width + 2}}"
                     )
 
                 stdscr.addnstr(

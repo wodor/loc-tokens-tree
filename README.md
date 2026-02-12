@@ -4,6 +4,7 @@
 
 - counts LOC (non-blank lines by default)
 - estimates tokens (`ceil(char_count / chars_per_token)`)
+- tracks file/directory size
 - aggregates totals per directory (`root`, `subdirs`, `total`)
 - lists files in each directory (including non-counted extensions)
 - provides a tree view and an ncdu-like interactive browser
@@ -91,19 +92,20 @@ python3 loc_tree.py /path/to/repo --extensions .sh
 - `j/k` or `Up/Down`: move
 - `Enter` or `Right`: open directory
 - `Left` / `Backspace`: go to parent
-- `s`: cycle sorting (`tokens`, `lines`, `name`)
+- `s`: cycle sorting (`tokens`, `lines`, `size`, `name`)
 - `q`: quit
 
 Interactive table includes:
 
-- `Lines`, `Tokens`
+- `Lines`, `Tokens`, `Size`
 - `LOC Bar`, `Token Bar`
 - `Counted` status for files (`yes`/`no`)
 
 ## Output semantics
 
 - Directory metrics:
-  - `root`: counted files directly in that directory
+  - `root`: direct files in that directory (`lines`/`tokens` for counted extensions, `size` for all listed files)
   - `subdirs`: sum of all descendant directories
   - `total`: `root + subdirs`
-- Files with non-counted extensions are still listed with `0 lines, ~0 tokens` and marked as excluded extension.
+- `Size` is accumulated for all listed files, including files excluded from LOC/token counting by extension.
+- Files with non-counted extensions are still listed with `0 lines, ~0 tokens`, their size, and marked as excluded extension.
